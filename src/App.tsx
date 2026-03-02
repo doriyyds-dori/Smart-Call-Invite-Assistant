@@ -10,13 +10,19 @@ import {
   Users,
   CheckCircle2,
   ArrowRight,
-  FileText
+  FileText,
+  ChevronDown,
+  ChevronUp,
+  RotateCcw,
+  HelpCircle
 } from 'lucide-react';
 import Papa from 'papaparse';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import { ScriptStep, CustomerType, ScriptOption } from './types';
+import { ScriptStep, CustomerType, ScriptOption, MenuItem } from './types';
 import { DEFAULT_EXISTING_SCRIPT, CSV_TEMPLATE } from './constants';
+import { DEFAULT_COMMON_FAQ } from './defaultFaqData';
+import { FAQ_MENU } from './faqData';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -26,10 +32,13 @@ export default function App() {
   const [customerType, setCustomerType] = useState<CustomerType>('existing');
   const [existingScript, setExistingScript] = useState<ScriptStep[]>(DEFAULT_EXISTING_SCRIPT);
   const [newScript, setNewScript] = useState<ScriptStep[]>([]);
+  const [commonFaqScript, setCommonFaqScript] = useState<ScriptStep[]>(DEFAULT_COMMON_FAQ);
   const [globalOptions, setGlobalOptions] = useState<ScriptOption[]>([]);
   const [currentStepId, setCurrentStepId] = useState<string>('开场白');
   const [history, setHistory] = useState<{ role: 'agent' | 'customer', text: string }[]>([]);
   const [isCallActive, setIsCallActive] = useState(false);
+  const [expandedLevel1, setExpandedLevel1] = useState<string | null>(null);
+  const [expandedLevel2, setExpandedLevel2] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const script = customerType === 'existing' ? existingScript : newScript;
@@ -42,7 +51,6 @@ export default function App() {
   }, [history]);
 
   useEffect(() => {
-    // Extract global options from script on load or script change
     const globalStep = script.find(s => s.id === '全局问题');
     if (globalStep) {
       setGlobalOptions(globalStep.customerOptions);
@@ -65,16 +73,12 @@ export default function App() {
 
   const handleCustomerResponse = (option: ScriptOption) => {
     const newHistory = [...history];
-    // 1. Add customer's response to chat
     newHistory.push({ role: 'customer', text: option.label });
-    // 2. Add agent's immediate reaction to chat
     newHistory.push({ role: 'agent', text: option.agentResponse });
     
-    // 3. Move to next step if exists
     if (option.nextStepId && option.nextStepId !== '结束') {
       const nextStep = script.find(s => s.id === option.nextStepId);
       if (nextStep) {
-        // If the next step has a script, and it's not just a duplicate of the response
         if (nextStep.agentScript && nextStep.agentScript !== option.agentResponse) {
           newHistory.push({ role: 'agent', text: nextStep.agentScript });
         }
@@ -82,6 +86,59 @@ export default function App() {
       }
     } else if (option.nextStepId === '结束') {
       setCurrentStepId('结束');
+    }
+    
+    setHistory(newHistory);
+  };
+
+  const handleFaqClick = (question: string, level1Label: string, level2Label?: string) => {
+    // Matching logic:
+    // 1. Exact match with "L1_L2_Question" (if L2 exists)
+    // 2. Exact match with "L1_Question"
+    // 3. Fuzzy match with "Question"
+    const exactKeyWithL2 = level2Label ? `${level1Label}_${level2Label}_${question}` : null;
+    const exactKeyL1 = `${level1Label}_${question}`;
+    
+    let foundOption: ScriptOption | undefined;
+    
+    const searchPools = [commonFaqScript, script];
+    
+    for (const pool of searchPools) {
+      for (const step of pool) {
+        // Try L1_L2_Q first
+        if (exactKeyWithL2) {
+          const exactL2 = step.customerOptions.find(opt => opt.label === exactKeyWithL2);
+          if (exactL2) { foundOption = exactL2; break; }
+        }
+        // Then try L1_Q
+        const exactL1 = step.customerOptions.find(opt => opt.label === exactKeyL1);
+        if (exactL1) { foundOption = exactL1; break; }
+      }
+      if (foundOption) break;
+    }
+
+    if (!foundOption) {
+      for (const pool of searchPools) {
+        for (const step of pool) {
+          const fuzzy = step.customerOptions.find(opt => opt.label.includes(question));
+          if (fuzzy) {
+            foundOption = fuzzy;
+            break;
+          }
+        }
+        if (foundOption) break;
+      }
+    }
+
+    const newHistory = [...history];
+    // Add customer's question to chat
+    newHistory.push({ role: 'customer', text: question });
+    
+    if (foundOption) {
+      // Add agent's response to chat
+      newHistory.push({ role: 'agent', text: foundOption.agentResponse });
+    } else {
+      newHistory.push({ role: 'agent', text: '抱歉，该问题暂无录入话术' });
     }
     
     setHistory(newHistory);
@@ -95,9 +152,11 @@ export default function App() {
     link.click();
   };
 
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>, target: 'existing' | 'new' | 'common' = 'existing') => {
     const file = event.target.files?.[0];
     if (!file) return;
+
+    const uploadTarget = target === 'existing' ? (customerType === 'existing' ? 'existing' : 'new') : target;
 
     Papa.parse(file, {
       header: true,
@@ -109,12 +168,12 @@ export default function App() {
         
         phases.forEach((phase, index) => {
           const phaseData = data.filter(d => d.Phase === phase);
-          // If StepId is "全局问题", we treat it specially
           const stepId = phaseData[0].StepId || `step_${index}`;
           
           newSteps.push({
             id: stepId,
             phase: phase as string,
+            coreLogic: phaseData[0].CoreLogic || '',
             agentScript: phaseData[0].AgentScript || (stepId === '全局问题' ? '（客户随时可能追问的问题）' : '请继续引导客户'),
             customerOptions: phaseData.map(d => ({
               label: d.CustomerOption,
@@ -125,12 +184,16 @@ export default function App() {
         });
 
         if (newSteps.length > 0) {
-          if (customerType === 'existing') {
+          if (uploadTarget === 'existing') {
             setExistingScript(newSteps);
-          } else {
+            alert("保有潜客话术库更新成功！");
+          } else if (uploadTarget === 'new') {
             setNewScript(newSteps);
+            alert("首次邀约话术库更新成功！");
+          } else if (uploadTarget === 'common') {
+            setCommonFaqScript(newSteps);
+            alert("常见问题通用话术库更新成功！两个模块均已生效。");
           }
-          alert(`${customerType === 'existing' ? '保有潜客' : '首次邀约'}话术库更新成功！`);
         }
       }
     });
@@ -177,9 +240,16 @@ export default function App() {
                 <Download className="w-3.5 h-3.5 sm:w-4 sm:h-4" /> <span className="hidden sm:inline">下载模板</span>
               </button>
               
-              <label className="p-1.5 sm:p-0 sm:flex items-center gap-2 text-[10px] sm:text-xs font-bold text-gray-500 hover:text-brand cursor-pointer" title="上传话术">
-                <Upload className="w-3.5 h-3.5 sm:w-4 sm:h-4" /> <span className="hidden sm:inline">上传话术</span>
-                <input type="file" accept=".csv" className="hidden" onChange={handleFileUpload} />
+              <div className="h-4 w-px bg-gray-200 mx-1 hidden sm:block" />
+
+              <label className="p-1.5 sm:p-0 sm:flex items-center gap-2 text-[10px] sm:text-xs font-bold text-brand hover:text-brand-hover cursor-pointer" title="上传常见话术">
+                <HelpCircle className="w-3.5 h-3.5 sm:w-4 sm:h-4" /> <span className="hidden sm:inline">上传常见话术</span>
+                <input type="file" accept=".csv" className="hidden" onChange={(e) => handleFileUpload(e, 'common')} />
+              </label>
+
+              <label className="p-1.5 sm:p-0 sm:flex items-center gap-2 text-[10px] sm:text-xs font-bold text-gray-500 hover:text-brand cursor-pointer" title="上传流程话术">
+                <Upload className="w-3.5 h-3.5 sm:w-4 sm:h-4" /> <span className="hidden sm:inline">上传流程话术</span>
+                <input type="file" accept=".csv" className="hidden" onChange={(e) => handleFileUpload(e, 'existing')} />
               </label>
             </div>
           </div>
@@ -187,10 +257,9 @@ export default function App() {
       </header>
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-4 grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6 lg:overflow-hidden">
-        {/* Left: Chat History (WeChat Style) */}
+        {/* Left: Chat History */}
         <div className="lg:col-span-8 flex flex-col min-h-[500px] lg:min-h-0 h-[calc(100vh-120px)] lg:h-full">
           <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden flex flex-col h-full">
-            {/* Chat Header */}
             <div className="px-4 sm:px-5 py-2.5 sm:py-3 bg-gray-50 border-b border-gray-100 flex items-center justify-between shrink-0">
               <div className="flex items-center gap-2">
                 <div className="w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full bg-green-500 animate-pulse" />
@@ -201,7 +270,6 @@ export default function App() {
               )}
             </div>
 
-            {/* History Area */}
             <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4 bg-[#EDEDED]">
               {!isCallActive ? (
                 <div className="h-full flex flex-col items-center justify-center text-center p-4 sm:p-8">
@@ -234,10 +302,8 @@ export default function App() {
               )}
             </div>
 
-            {/* Interaction Area (Customer Options) */}
             {isCallActive && (
               <div className="p-3 sm:p-4 bg-white border-t border-gray-100 shrink-0 space-y-3 sm:space-y-4">
-                {/* Global Options */}
                 {globalOptions.length > 0 && (
                   <div>
                     <p className="text-[9px] sm:text-[10px] font-black text-brand uppercase tracking-widest mb-2 flex items-center gap-1">
@@ -257,7 +323,6 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Current Step Options */}
                 {currentStep && currentStep.id !== '全局问题' && currentStep.customerOptions.length > 0 && (
                   <div>
                     <p className="text-[9px] sm:text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">当前对话反馈</p>
@@ -287,58 +352,125 @@ export default function App() {
           </div>
         </div>
 
-        {/* Right: Key Points Only */}
-        <div className="lg:col-span-4 flex flex-col gap-4 sm:gap-6 min-h-0">
-          {/* Points Card */}
-          <div className="bg-white rounded-2xl p-4 sm:p-6 shadow-sm border border-gray-200 flex flex-col h-full max-h-[400px] lg:max-h-none">
-            <div className="flex items-center gap-2 mb-4 sm:mb-6 shrink-0">
-              <div className="bg-brand-light p-1.5 rounded-lg">
-                <FileText className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-brand" />
-              </div>
-              <h3 className="text-xs sm:text-sm font-bold text-gray-800">当前阶段要点提示</h3>
+        {/* Right: FAQ Menu & Current Step Info */}
+        <div className="lg:col-span-4 flex flex-col gap-4 min-h-0 h-[calc(100vh-120px)] lg:h-full">
+          {/* FAQ Menu Card */}
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-200 flex flex-col flex-1 min-h-0">
+            <div className="px-4 py-3 bg-gray-50 border-b border-gray-100 flex items-center gap-2 shrink-0">
+              <HelpCircle className="w-4 h-4 text-brand" />
+              <h3 className="text-sm font-bold text-gray-800">常见问题话术库</h3>
             </div>
             
-            <div className="flex-1 overflow-y-auto pr-1 sm:pr-2">
-              <div className="bg-brand-light rounded-xl p-3 sm:p-4 mb-4 sm:mb-6 border border-brand-light">
-                <h4 className="text-[10px] sm:text-xs font-black text-brand uppercase tracking-widest mb-2 sm:mb-3">核心逻辑</h4>
-                <p className="text-xs sm:text-sm font-bold text-gray-800 leading-relaxed">
-                  {currentStepId === '开场白' && "建立信任，抛出利益点，争取30秒时间。"}
-                  {currentStepId === '核心价值传递' && "强调权益力度，引导到店算账，避免死磕价格。"}
-                  {currentStepId === '邀约成交' && "二选一锁定时间，利用盲盒等礼品增加吸引力。"}
-                  {currentStepId === '结束' && "保持礼貌，为后续跟进留好伏笔。"}
-                </p>
-              </div>
-
-              <div className="space-y-3 sm:space-y-4">
-                <h4 className="text-[9px] sm:text-[10px] font-black text-gray-400 uppercase tracking-widest">实战建议</h4>
-                <div className="space-y-2.5 sm:space-y-3">
-                  <div className="flex gap-2.5 sm:gap-3">
-                    <div className="w-5 h-5 sm:w-6 sm:h-6 bg-gray-100 rounded flex items-center justify-center shrink-0">
-                      <RefreshCcw className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-gray-500" />
+            <div className="flex-1 overflow-y-auto p-2 space-y-1">
+              {FAQ_MENU.map((item) => (
+                <div key={item.id} className="border border-gray-100 rounded-lg overflow-hidden">
+                  <button
+                    onClick={() => setExpandedLevel1(expandedLevel1 === item.id ? null : item.id)}
+                    className={cn(
+                      "w-full px-3 py-2.5 flex items-center justify-between text-xs font-bold transition-colors",
+                      expandedLevel1 === item.id ? "bg-brand text-white" : "bg-white text-gray-700 hover:bg-gray-50"
+                    )}
+                  >
+                    <span>{item.label}</span>
+                    {expandedLevel1 === item.id ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                  </button>
+                  
+                  {expandedLevel1 === item.id && (
+                    <div className="bg-gray-50 p-1 space-y-1">
+                      {/* Level 2 Children (only for 产品卖点) */}
+                      {item.children ? (
+                        <div className="grid grid-cols-2 gap-1">
+                          {[...item.children]
+                            .sort((a, b) => (a.id === expandedLevel2 ? -1 : b.id === expandedLevel2 ? 1 : 0))
+                            .map((child) => (
+                              <div 
+                                key={child.id} 
+                                className={cn(
+                                  "border border-gray-200 rounded-md overflow-hidden bg-white flex flex-col transition-all duration-200",
+                                  expandedLevel2 === child.id ? "col-span-2" : "col-span-1"
+                                )}
+                              >
+                                <button
+                                  onClick={() => setExpandedLevel2(expandedLevel2 === child.id ? null : child.id)}
+                                  className={cn(
+                                    "w-full px-2 py-1.5 flex items-center justify-between text-[10px] font-bold transition-colors",
+                                    expandedLevel2 === child.id 
+                                      ? "bg-brand-light text-brand" 
+                                      : "bg-brand-light/50 text-brand/80 hover:bg-brand-light/80"
+                                  )}
+                                >
+                                  <span className="truncate">{child.label}</span>
+                                  {expandedLevel2 === child.id ? <ChevronUp className="w-3 h-3 shrink-0" /> : <ChevronDown className="w-3 h-3 shrink-0" />}
+                                </button>
+                                
+                                {expandedLevel2 === child.id && (
+                                  <div className="p-1 bg-gray-50 border-t border-gray-100">
+                                    <div className="grid grid-cols-2 gap-1 mb-1">
+                                      {child.buttons.map((btn, idx) => (
+                                        <button
+                                          key={idx}
+                                          onClick={() => handleFaqClick(btn, item.label, child.label)}
+                                          className="text-left px-2 py-1.5 bg-white border border-gray-200 rounded text-[10px] text-gray-700 hover:border-brand hover:text-brand transition-all shadow-sm leading-tight"
+                                        >
+                                          {btn}
+                                        </button>
+                                      ))}
+                                    </div>
+                                    <button 
+                                      onClick={() => setExpandedLevel2(null)}
+                                      className="w-full text-center py-1 text-[9px] text-gray-400 hover:text-brand flex items-center justify-center gap-1"
+                                    >
+                                      <RotateCcw className="w-2.5 h-2.5" /> 返回
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                        </div>
+                      ) : (
+                        /* Level 2 Buttons (for others) */
+                        <div className="p-1 grid grid-cols-2 gap-1.5">
+                          {item.buttons?.map((btn, idx) => (
+                            <button
+                              key={idx}
+                              onClick={() => handleFaqClick(btn, item.label)}
+                              className="text-left px-2 py-2 bg-white border border-gray-200 rounded-md text-[10px] text-gray-700 hover:border-brand hover:text-brand transition-all shadow-sm leading-tight"
+                            >
+                              {btn}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <button 
+                        onClick={() => setExpandedLevel1(null)}
+                        className="w-full text-center py-1.5 text-[10px] text-gray-400 hover:text-brand flex items-center justify-center gap-1"
+                      >
+                        <RotateCcw className="w-3 h-3" /> 返回上一级
+                      </button>
                     </div>
-                    <p className="text-[10px] sm:text-xs text-gray-600 leading-relaxed">如果客户犹豫，可以强调“名额有限”和“老客户优先”的紧迫感。</p>
-                  </div>
-                  <div className="flex gap-2.5 sm:gap-3">
-                    <div className="w-5 h-5 sm:w-6 sm:h-6 bg-gray-100 rounded flex items-center justify-center shrink-0">
-                      <CheckCircle2 className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-gray-500" />
-                    </div>
-                    <p className="text-[10px] sm:text-xs text-gray-600 leading-relaxed">当客户对比竞品时，重点引导其亲自感受内饰质感和底盘调校。</p>
-                  </div>
-                  <div className="flex gap-2.5 sm:gap-3">
-                    <div className="w-5 h-5 sm:w-6 sm:h-6 bg-gray-100 rounded flex items-center justify-center shrink-0">
-                      <ChevronRight className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-gray-500" />
-                    </div>
-                    <p className="text-[10px] sm:text-xs text-gray-600 leading-relaxed">始终保持积极乐观的情绪价值，让客户感受到您的专业与热情。</p>
-                  </div>
+                  )}
                 </div>
-              </div>
+              ))}
             </div>
+          </div>
 
-            <div className="mt-4 sm:mt-6 pt-3 sm:pt-4 border-t border-gray-100 shrink-0">
-              <div className="bg-gray-900 rounded-xl p-3 sm:p-4 text-white">
-                <p className="text-[9px] sm:text-[10px] font-black text-brand uppercase tracking-widest mb-0.5 sm:mb-1">当前阶段</p>
-                <p className="text-xs sm:text-sm font-bold">{currentStep?.phase || '准备中'}</p>
+          {/* Current Step Info Box */}
+          <div className="bg-gray-900 rounded-2xl p-4 shadow-lg shrink-0 border border-gray-800">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <div className="bg-brand p-1 rounded-md">
+                  <FileText className="w-3.5 h-3.5 text-white" />
+                </div>
+                <span className="text-[10px] font-black text-brand uppercase tracking-widest">当前阶段</span>
               </div>
+              <span className="text-xs font-bold text-white">{currentStep?.phase || '准备中'}</span>
+            </div>
+            
+            <div className="bg-gray-800/50 rounded-xl p-3 border border-gray-700">
+              <h4 className="text-[9px] font-black text-gray-500 uppercase tracking-widest mb-1.5">核心逻辑</h4>
+              <p className="text-xs font-bold text-gray-200 leading-relaxed">
+                {currentStep?.coreLogic || "暂无逻辑提示"}
+              </p>
             </div>
           </div>
         </div>

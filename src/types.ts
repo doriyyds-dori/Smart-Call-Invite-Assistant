@@ -10,11 +10,20 @@ export interface ScriptStep {
   phase: string;
   agentScript: string;
   customerOptions: ScriptOption[];
+  coreLogic?: string;
 }
 
-export interface ScriptData {
-  opening: string;
-  steps: ScriptStep[];
+export interface MenuItem {
+  id: string;
+  label: string;
+  children?: {
+    id: string;
+    label: string;
+    buttons: string[];
+  }[];
+  buttons?: string[];
 }
+
+export type MenuData = MenuItem[];
 
 export type CustomerType = 'existing' | 'new';
